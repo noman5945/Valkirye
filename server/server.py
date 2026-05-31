@@ -3,6 +3,7 @@ from fastapi import FastAPI
 from server.app.router.auth_router import router as authRouter
 from server.app.websocket.chat_socket import router as chatRouter
 from server.app.router.user_router import router as userRouter
+from server.app.router.key_management_router import router as keyRouter
 from server.app.database.connection import init_db
 
 if sys.platform == "win32":
@@ -21,3 +22,4 @@ async def startUp():
 app.include_router(authRouter)
 app.include_router(chatRouter)
 app.include_router(userRouter)
+app.include_router(keyRouter)

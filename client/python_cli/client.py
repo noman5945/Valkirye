@@ -1,5 +1,6 @@
 import asyncio
 from client.python_cli.app.services.cli_Insterface_Services import CLIinterfaceServices
+from client.python_cli.app.services.keyServices import KeyServices
 
 async def main():
     cli_interface_service=CLIinterfaceServices()
@@ -22,8 +23,10 @@ async def main():
                 current_user = data["current_user"]
 
                 print(f"\nCurrent User: {current_user}")
+                keyservice=KeyServices(current_user)
+                keyservice.initialize_keys()
 
-                await cli_interface_service.chatMenu(current_user=current_user)
+                await cli_interface_service.chatMenu(current_user=current_user,keyService=keyservice)
 
         elif choice == "2":
 

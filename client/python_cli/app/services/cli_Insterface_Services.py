@@ -5,7 +5,7 @@ from client.python_cli.app.services.userServices import UserServices
 from client.python_cli.app.services.websocketServices import WebsocketClientService
 from client.python_cli.app.services.cryptoServices import CryptoServices
 from client.python_cli.app.services.chatServices import ChatService
-from secrets import token_bytes
+from client.python_cli.app.services.keyServices import KeyServices
 
 class CLIinterfaceServices:
     def __init__(self) -> None:
@@ -50,63 +50,156 @@ class CLIinterfaceServices:
     async def getUsersService(self):
         await self.userService.getOnlineUsers()   
 
-    async def chatMenu(self, current_user: str):
+    async def chatMenu(self, current_user: str, keyService: KeyServices):
 
-        while True:
+        crypto_service = CryptoServices()
+        chat_service = ChatService(
+            self.socketClientService,
+            crypto_service,
+            keyService
+        )
 
-            print("\n" + "=" * 60)
-            print(f"Welcome {current_user}")
-            print("=" * 60)
+        background_task = asyncio.create_task(
+            chat_service.receive_loop(current_user=current_user)
+        )
 
-            print("1. Show Online Users")
-            print("2. Start Chat")
-            print("3. Logout")
+        async def interruptible_input(prompt: str) -> str | None:
+            """
+            Shows input prompt but cancels it if a chat request arrives.
+            Returns None if interrupted, otherwise returns what user typed.
+            """
+            chat_service.request_event.clear()
 
-            choice = input("Select Option: ")
+            input_task = asyncio.create_task(asyncio.to_thread(input, prompt))
+            interrupt_task = asyncio.create_task(chat_service.request_event.wait())
 
-            if choice == "1":
+            done, pending = await asyncio.wait(
+                [input_task, interrupt_task],
+                return_when=asyncio.FIRST_COMPLETED
+            )
 
-                await self.getUsersService()
+            for task in pending:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
-            elif choice == "2":
-                #shared_key = token_bytes(32)
-                shared_key = b'12345678901234567890123456789012' #Tmeporary
-                crypto_service = CryptoServices(shared_key)
-                chat_service = ChatService(
-                    self.socketClientService,
-                    crypto_service
+            if interrupt_task in done:
+                return None  # chat request arrived
+            return input_task.result()
+
+        async def handle_pending_requests():
+            while not chat_service.incoming_requests.empty():
+                payload = chat_service.incoming_requests.get_nowait()
+                sender = payload["sender"]
+
+                print(f"\n[{sender} wants to chat — type A to accept or Enter to skip]")
+                answer = await asyncio.to_thread(input, "Accept? (A): ")
+
+                if answer.strip().upper() != "A":
+                    print(f"Skipped request from {sender}.")
+                    continue
+
+                await chat_service.send_chat_accept(
+                    sender=current_user,
+                    receiver=sender
                 )
-                
-                receiver = input("Enter username: ")
-                print(
-                    f"Secure chat started with {receiver}"
-                )
+                print(f"Accepted. Waiting for session key from {sender}...")
 
-                receiver_task = asyncio.create_task(
-                    chat_service.receive_loop()
-                )
-
-                while True:
-
-                    message = await asyncio.to_thread(
-                        input,
-                        f"{current_user}: "
-                    )
-
-                    if message == "/exit":
-                        receiver_task.cancel()
+                for _ in range(10):
+                    if chat_service.cryptoService.is_ready():
                         break
+                    await asyncio.sleep(0.5)
 
+                if not chat_service.cryptoService.is_ready():
+                    print("[Session key never arrived — aborting]")
+                    return
+
+                print(f"Secure chat with {sender}. Type /exit to leave.")
+                while True:
+                    message = await asyncio.to_thread(input, f"{current_user}: ")
+                    if message.strip() == "/exit":
+                        print("Left chat.")
+                        break
                     await chat_service.send_message(
                         sender=current_user,
-                        receiver=receiver,
+                        receiver=sender,
                         plain_text=message
                     )
 
-            elif choice == "3":
+        try:
+            while True:
+                await handle_pending_requests()
 
-                break
+                print("\n" + "=" * 60)
+                print(f"Welcome {current_user}")
+                print("=" * 60)
+                print("1. Show Online Users")
+                print("2. Start Chat")
+                print("3. Logout")
 
-            else:
+                # ← This input can now be interrupted by incoming chat request
+                choice = await interruptible_input("Select Option: ")
 
-                print("Invalid option")
+                if choice is None:
+                    # Interrupted — a chat request arrived mid-prompt
+                    print("\n[Incoming chat request!]")
+                    continue  # loop back → handle_pending_requests() runs
+
+                if choice == "1":
+                    await self.getUsersService()
+
+                elif choice == "2":
+                    receiver = await asyncio.to_thread(input, "Enter username: ")
+
+                    await chat_service.send_chat_request(
+                        sender=current_user,
+                        receiver=receiver
+                    )
+
+                    accepted, i_am_initiator = await chat_service.wait_for_accept(
+                        sender=current_user,
+                        receiver=receiver
+                    )
+                    if not accepted:
+                        continue
+
+                    if i_am_initiator:
+                        await chat_service.send_session_key(
+                            sender=current_user,
+                            receiver=receiver
+                        )
+                        print(f"Secure chat started with {receiver}. Type /exit to leave.")
+                    else:
+                        print(f"Waiting for session key from {receiver}...")
+                        for _ in range(20):  # 10 seconds
+                            if chat_service.cryptoService.is_ready():
+                                break
+                            await asyncio.sleep(0.5)
+
+                        if not chat_service.cryptoService.is_ready():
+                            print("[Session key never arrived — aborting]")
+                            continue
+
+                        print(f"Secure chat with {receiver}. Type /exit to leave.")
+
+                    while True:
+                        message = await asyncio.to_thread(input, f"{current_user}: ")
+                        if message.strip() == "/exit":
+                            print("Left chat.")
+                            break
+                        await chat_service.send_message(
+                            sender=current_user,
+                            receiver=receiver,
+                            plain_text=message
+                        )
+
+                elif choice == "3":
+                    break
+
+                else:
+                    print("Invalid option")
+
+        finally:
+            background_task.cancel()

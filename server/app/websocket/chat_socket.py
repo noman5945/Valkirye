@@ -24,19 +24,17 @@ async def websocket_chat(
         print(f"{username} connected")
         try:
             while True:
-                data=await websocket.receive_json()
+                data = await websocket.receive_json()
                 print(f"Received from {username}: {data}")
 
-                msg_type = data.get("type")
-
-                if msg_type == "private_message":
-
-                    receiver = data.get("receiver")
-
+                receiver = data.get("receiver")
+                if receiver:
                     await socketManager.send_private_message(
                         receiver_id=receiver,
                         payload=data
                     )
+                else:
+                    print(f"No receiver in message: {data}")
                 
         except WebSocketDisconnect:
             await socketManager.disconnect(username)
